@@ -21,9 +21,10 @@ vn.oanda的gateway接入
 
 
 import os
+import time
 import json
 import datetime
-
+from threading import Thread
 from vnpy.api.oanda import OandaApi
 from vnpy.trader.vtGateway import *
 from vnpy.trader.vtFunction import getJsonPath
@@ -50,7 +51,8 @@ class OandaGateway(VtGateway):
         """Constructor"""
         super(OandaGateway, self).__init__(eventEngine, gatewayName)
         
-        self.api = Api(self)     
+        self.api = Api(self)
+        self.pricePusher = OandaPricePusher(self.api)
         
         self.qryEnabled = False         # 是否要启动循环查询
         
@@ -94,15 +96,18 @@ class OandaGateway(VtGateway):
         self.api.qryInstruments()
         self.api.qryOrders()
         self.api.qryTrades()
-        
+
+        # start checking prices
+        self.pricePusher.run()
+
         # 初始化并启动查询
         self.initQuery()
     
     #----------------------------------------------------------------------
     def subscribe(self, subscribeReq):
         """订阅行情"""
-        pass
-        
+        self.pricePusher.subscribe(subscribeReq)
+
     #----------------------------------------------------------------------
     def sendOrder(self, orderReq):
         """发单"""
@@ -170,6 +175,29 @@ class OandaGateway(VtGateway):
         self.qryEnabled = qryEnabled
     
 
+class OandaPricePusher():
+
+    def __init__(self, api):
+        self.api = api
+        self.subscribeSymbolList = set()
+        self.queryThread = Thread(target=self.query)
+        self.interval = 1
+        self.active = False
+
+    def subscribe(self, subscribeReq):
+        self.subscribeSymbolList.add(subscribeReq.symbol)
+
+    def query(self):
+        while self.active:
+            time.sleep(self.interval)
+            for symbol in self.subscribeSymbolList:
+                params = dict()
+                params['instruments'] = symbol
+                self.api.getPrices(params)
+
+    def run(self):
+        self.active = True
+        self.queryThread.start()
 
 ########################################################################
 class Api(OandaApi):
@@ -192,6 +220,16 @@ class Api(OandaApi):
         err.gatewayName = self.gatewayName
         err.errorMsg = error
         self.gateway.onError(err)
+
+    def onGetPrices(self, data, reqID):
+        for price in data['prices']:
+            tick = VtTickData()
+            tick.gatewayName = self.gatewayName
+            tick.symbol = price['instrument'] + '.OANDA'
+            tick.vtSymbol = price['instrument']
+            tick.askPrice1 = price['ask']
+            tick.bidPrice1 = price['bid']
+            self.gateway.onTick(tick)
 
     #----------------------------------------------------------------------
     def onGetInstruments(self, data, reqID):
